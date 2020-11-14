@@ -14,6 +14,7 @@
     missing_docs,
     unused_qualifications
 )]
+#![cfg_attr(not(test), no_std)]
 
 use core::cell::UnsafeCell;
 use core::fmt::{self, Debug, Display, Formatter};
@@ -149,7 +150,7 @@ impl<'a, T> ReadGuard<'a, T> {
             == 1
         {
             let lock = guard.lock;
-            std::mem::forget(guard);
+            core::mem::forget(guard);
             Ok(WriteGuard {
                 lock,
                 not_send: PhantomData,
@@ -200,7 +201,7 @@ impl<'a, T> WriteGuard<'a, T> {
     /// Downgrade the `WriteGuard` to a `ReadGuard`.
     pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
         let lock = guard.lock;
-        std::mem::forget(guard);
+        core::mem::forget(guard);
         lock.readers.store(1, atomic::Ordering::Release);
         ReadGuard {
             lock,
