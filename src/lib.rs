@@ -47,41 +47,35 @@ impl<T> TryRwLock<T> {
     /// If the lock is currently being written to or there are `usize::MAX` existing readers, this
     /// function will return `None`.
     pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
-        let mut readers = self.readers.load(atomic::Ordering::Acquire);
-
-        loop {
-            if readers == usize::MAX {
-                return None;
-            }
-            let new_readers =
-                self.readers
-                    .compare_and_swap(readers, readers + 1, atomic::Ordering::AcqRel);
-            if new_readers == readers {
-                return Some(ReadGuard {
-                    lock: self,
-                    not_send: PhantomData,
-                });
-            }
-            readers = new_readers;
-        }
+        self.readers
+            .fetch_update(
+                atomic::Ordering::Acquire,
+                atomic::Ordering::Relaxed,
+                |readers| readers.checked_add(1),
+            )
+            .ok()
+            .map(|_| ReadGuard {
+                lock: self,
+                not_send: PhantomData,
+            })
     }
 
     /// Attempt to lock this `TryRwLock` with unique write access.
     ///
     /// If the lock is currently being written to or read from, this function will return `None`.
     pub fn try_write(&self) -> Option<WriteGuard<'_, T>> {
-        if self
-            .readers
-            .compare_and_swap(0, usize::MAX, atomic::Ordering::AcqRel)
-            == 0
-        {
-            Some(WriteGuard {
+        self.readers
+            .compare_exchange(
+                0,
+                usize::MAX,
+                atomic::Ordering::Acquire,
+                atomic::Ordering::Relaxed,
+            )
+            .ok()
+            .map(|_| WriteGuard {
                 lock: self,
                 not_send: PhantomData,
             })
-        } else {
-            None
-        }
     }
 
     /// Get the underlying data of the lock.
@@ -143,20 +137,21 @@ impl<'a, T> ReadGuard<'a, T> {
     ///
     /// Fails if there is more than one reader currently using the lock.
     pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'a, T>, Self> {
-        if guard
-            .lock
-            .readers
-            .compare_and_swap(1, usize::MAX, atomic::Ordering::AcqRel)
-            == 1
-        {
-            let lock = guard.lock;
-            core::mem::forget(guard);
-            Ok(WriteGuard {
-                lock,
-                not_send: PhantomData,
-            })
-        } else {
-            Err(guard)
+        match guard.lock.readers.compare_exchange(
+            1,
+            usize::MAX,
+            atomic::Ordering::Acquire,
+            atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                let lock = guard.lock;
+                core::mem::forget(guard);
+                Ok(WriteGuard {
+                    lock,
+                    not_send: PhantomData,
+                })
+            }
+            Err(_) => Err(guard),
         }
     }
 }
