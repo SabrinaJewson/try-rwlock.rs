@@ -56,10 +56,7 @@ impl<T> TryRwLock<T> {
                 |readers| readers.checked_add(1),
             )
             .ok()
-            .map(|_| ReadGuard {
-                lock: self,
-                not_send: PhantomData,
-            })
+            .map(|_| ReadGuard { lock: self })
     }
 
     /// Attempt to lock this `TryRwLock` with unique write access.
@@ -76,7 +73,7 @@ impl<T> TryRwLock<T> {
             .ok()
             .map(|_| WriteGuard {
                 lock: self,
-                not_send: PhantomData,
+                _send_sync_bounds: PhantomData,
             })
     }
 
@@ -121,14 +118,19 @@ impl<T> From<T> for TryRwLock<T> {
     }
 }
 
+// This implementation requires `T` to be `Send` because it owns a `T`, allows unique access to it
+// and destroys it in its destructor.
 unsafe impl<T: Send> Send for TryRwLock<T> {}
+
+// `T` is required to be `Send` because this type allows upgrading `&TryRwLock<T>` to `&mut T`,
+// which means it can be dropped on a different thread. `T` is additionally required to be `Sync`
+// because it allows the user to obtain an `&T`.
 unsafe impl<T: Send + Sync> Sync for TryRwLock<T> {}
 
 /// A RAII guard that guarantees shared read access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
 pub struct ReadGuard<'a, T> {
     lock: &'a TryRwLock<T>,
-    not_send: PhantomData<*mut ()>,
 }
 
 impl<'a, T> ReadGuard<'a, T> {
@@ -149,7 +151,7 @@ impl<'a, T> ReadGuard<'a, T> {
                 core::mem::forget(guard);
                 Ok(WriteGuard {
                     lock,
-                    not_send: PhantomData,
+                    _send_sync_bounds: PhantomData,
                 })
             }
             Err(_) => Err(guard),
@@ -171,8 +173,6 @@ impl<T> Drop for ReadGuard<'_, T> {
     }
 }
 
-unsafe impl<T: Sync> Sync for ReadGuard<'_, T> {}
-
 impl<T: Debug> Debug for ReadGuard<'_, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("TryRwLockReadGuard")
@@ -190,7 +190,7 @@ impl<T: Display> Display for ReadGuard<'_, T> {
 #[must_use = "if unused the TryRwLock will immediately unlock"]
 pub struct WriteGuard<'a, T> {
     lock: &'a TryRwLock<T>,
-    not_send: PhantomData<*mut ()>,
+    _send_sync_bounds: PhantomData<&'a mut T>,
 }
 
 impl<'a, T> WriteGuard<'a, T> {
@@ -199,10 +199,7 @@ impl<'a, T> WriteGuard<'a, T> {
         let lock = guard.lock;
         core::mem::forget(guard);
         lock.readers.store(1, atomic::Ordering::Release);
-        ReadGuard {
-            lock,
-            not_send: PhantomData,
-        }
+        ReadGuard { lock }
     }
 }
 
@@ -224,8 +221,6 @@ impl<T> Drop for WriteGuard<'_, T> {
         self.lock.readers.store(0, atomic::Ordering::Release);
     }
 }
-
-unsafe impl<T: Sync> Sync for WriteGuard<'_, T> {}
 
 impl<T: Debug> Debug for WriteGuard<'_, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
