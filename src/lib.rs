@@ -90,6 +90,18 @@ impl<T> TryRwLock<T> {
     pub fn get_mut(&mut self) -> &mut T {
         self.data.get_mut()
     }
+
+    /// Check if the lock is currently locked in any way.
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        self.readers.load(atomic::Ordering::Acquire) != 0
+    }
+
+    /// Check if the lock is currently locked for writing, or if there are `usize::MAX` readers.
+    #[must_use]
+    pub fn is_write_locked(&self) -> bool {
+        self.readers.load(atomic::Ordering::Acquire) == usize::MAX
+    }
 }
 
 impl<T: Debug> Debug for TryRwLock<T> {
@@ -250,6 +262,8 @@ impl<T: Display> Display for WriteGuard<'_, T> {
 #[test]
 fn test_read() {
     let lock = TryRwLock::new("Hello World!".to_owned());
+    assert!(!lock.is_locked());
+    assert!(!lock.is_write_locked());
 
     let guard_1 = lock.try_read().unwrap();
     let guard_2 = lock.try_read().unwrap();
@@ -258,6 +272,8 @@ fn test_read() {
     assert_eq!(&*guard_2, "Hello World!");
 
     assert!(lock.try_write().is_none());
+    assert!(lock.is_locked());
+    assert!(!lock.is_write_locked());
     let guard_1 = ReadGuard::try_upgrade(guard_1).unwrap_err();
     let guard_2 = ReadGuard::try_upgrade(guard_2).unwrap_err();
 
@@ -271,6 +287,9 @@ fn test_read() {
     assert!(lock.try_read().is_some());
 
     drop(guard_2);
+
+    assert!(!lock.is_locked());
+    assert!(!lock.is_write_locked());
 }
 
 #[test]
@@ -283,10 +302,14 @@ fn test_write() {
     *guard = "Foo".to_owned();
     assert_eq!(&*guard, "Foo");
 
+    assert!(lock.is_locked());
+    assert!(lock.is_write_locked());
     assert!(lock.try_read().is_none());
     assert!(lock.try_write().is_none());
 
     drop(guard);
 
+    assert!(!lock.is_locked());
+    assert!(!lock.is_write_locked());
     assert_eq!(&*lock.try_read().unwrap(), "Foo");
 }
