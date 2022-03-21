@@ -134,6 +134,12 @@ pub struct ReadGuard<'a, T> {
 }
 
 impl<'a, T> ReadGuard<'a, T> {
+    /// Get a shared reference to the lock that this read guard has locked.
+    #[must_use]
+    pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
+        guard.lock
+    }
+
     /// Attempt to upgrade the `ReadGuard` to a `WriteGuard`.
     ///
     /// # Errors
@@ -194,6 +200,12 @@ pub struct WriteGuard<'a, T> {
 }
 
 impl<'a, T> WriteGuard<'a, T> {
+    /// Get a shared reference to the lock that this write guard has locked.
+    #[must_use]
+    pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
+        guard.lock
+    }
+
     /// Downgrade the `WriteGuard` to a `ReadGuard`.
     pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
         let lock = guard.lock;
