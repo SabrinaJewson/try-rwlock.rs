@@ -16,11 +16,13 @@
 )]
 #![cfg_attr(not(test), no_std)]
 
-use core::cell::UnsafeCell;
-use core::fmt::{self, Debug, Display, Formatter};
-use core::marker::PhantomData;
-use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{self, AtomicUsize};
+use ::core::{
+    cell::UnsafeCell,
+    fmt::{self, Debug, Display, Formatter},
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    sync::atomic::{self, AtomicUsize},
+};
 
 /// A readers-writer lock.
 #[derive(Default)]
