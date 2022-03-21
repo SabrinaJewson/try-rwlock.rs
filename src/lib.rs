@@ -91,8 +91,7 @@ impl<T> TryRwLock<T> {
     /// As this method takes a mutable reference, no locking needs to take place.
     #[must_use]
     pub fn get_mut(&mut self) -> &mut T {
-        // SAFETY: We have a mutable reference to `self`.
-        unsafe { &mut *self.data.get() }
+        self.data.get_mut()
     }
 }
 
