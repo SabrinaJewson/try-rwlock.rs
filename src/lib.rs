@@ -189,8 +189,8 @@ impl<'a, T> ReadGuard<'a, T> {
 
 impl<'a, T, U> ReadGuard<'a, T, U> {
     /// Map to another value and keep locked.
-    pub fn map<V>(self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'a, T, V> {
-        let guard = ManuallyDrop::new(self);
+    pub fn map<V>(guard: Self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'a, T, V> {
+        let guard = ManuallyDrop::new(guard);
         ReadGuard {
             data: NonNull::from(f(&**guard)),
             lock: guard.lock,
@@ -258,8 +258,8 @@ impl<'a, T> WriteGuard<'a, T> {
 
 impl<'a, T, U> WriteGuard<'a, T, U> {
     /// Map to another value and keep locked.
-    pub fn map<V>(self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'a, T, V> {
-        let mut guard = ManuallyDrop::new(self);
+    pub fn map<V>(guard: Self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'a, T, V> {
+        let mut guard = ManuallyDrop::new(guard);
         WriteGuard {
             data: NonNull::from(f(&mut **guard)),
             lock: guard.lock,
@@ -337,9 +337,9 @@ fn test_read() {
 fn test_read_map() {
     let lock = TryRwLock::new(vec![1u8, 2, 3]);
 
-    let guard_1 = lock.try_read().unwrap().map(|v| &v[0]);
-    let guard_2 = lock.try_read().unwrap().map(|v| &v[1]);
-    let guard_3 = lock.try_read().unwrap().map(|v| &v[2]);
+    let guard_1 = ReadGuard::map(lock.try_read().unwrap(), |v| &v[0]);
+    let guard_2 = ReadGuard::map(lock.try_read().unwrap(), |v| &v[1]);
+    let guard_3 = ReadGuard::map(lock.try_read().unwrap(), |v| &v[2]);
 
     assert!(lock.is_locked());
     assert!(!lock.is_write_locked());
@@ -384,7 +384,7 @@ fn test_write() {
 fn test_write_map() {
     let lock = TryRwLock::new(vec![1u8, 2, 3]);
 
-    let guard = lock.try_write().unwrap().map(|v| &mut v[0]);
+    let guard = WriteGuard::map(lock.try_write().unwrap(), |v| &mut v[0]);
 
     assert!(lock.is_locked());
     assert!(lock.is_write_locked());
