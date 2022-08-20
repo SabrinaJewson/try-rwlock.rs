@@ -197,6 +197,12 @@ impl<'a, T, U> ReadGuard<'a, T, U> {
             lock: guard.lock,
         }
     }
+
+    /// Undo any previous mapping applied, returning the guard back to its original state.
+    pub fn unmap(guard: Self) -> ReadGuard<'a, T> {
+        let guard = ManuallyDrop::new(guard);
+        unsafe { ReadGuard::new(guard.lock) }
+    }
 }
 
 impl<T, U> Deref for ReadGuard<'_, T, U> {
@@ -275,6 +281,12 @@ impl<'a, T, U> WriteGuard<'a, T, U> {
             lock: guard.lock,
             _invariant_over_u: PhantomData,
         }
+    }
+
+    /// Undo any previous mapping applied, returning the guard back to its original state.
+    pub fn unmap(guard: Self) -> WriteGuard<'a, T> {
+        let guard = ManuallyDrop::new(guard);
+        unsafe { WriteGuard::new(guard.lock) }
     }
 }
 
@@ -360,6 +372,9 @@ fn test_read_map() {
     assert_eq!(*guard_2, 2);
     assert_eq!(*guard_3, 3);
 
+    let guard_1 = ReadGuard::unmap(guard_1);
+    assert_eq!(*guard_1, [1, 2, 3]);
+
     drop(guard_1);
     drop(guard_2);
     drop(guard_3);
@@ -402,6 +417,9 @@ fn test_write_map() {
     assert_eq!(lock.readers.load(atomic::Ordering::Relaxed), usize::MAX);
 
     assert_eq!(*guard, 1);
+
+    let guard = WriteGuard::unmap(guard);
+    assert_eq!(*guard, [1, 2, 3]);
 
     drop(guard);
 
