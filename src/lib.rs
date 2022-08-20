@@ -20,7 +20,7 @@ use ::core::{
     cell::UnsafeCell,
     fmt::{self, Debug, Display, Formatter},
     marker::PhantomData,
-    mem::{transmute, ManuallyDrop},
+    mem::ManuallyDrop,
     ops::{Deref, DerefMut},
     ptr::NonNull,
     sync::atomic::{self, AtomicUsize},
@@ -58,10 +58,7 @@ impl<T> TryRwLock<T> {
                 |readers| readers.checked_add(1),
             )
             .ok()
-            .map(|_| ReadGuard {
-                data: NonNull::new(self.data.get()).expect("`UnsafeCell::get` never returns null"),
-                lock: self,
-            })
+            .map(|_| unsafe { ReadGuard::new(self) })
     }
 
     /// Attempt to lock this `TryRwLock` with unique write access.
@@ -76,11 +73,7 @@ impl<T> TryRwLock<T> {
                 atomic::Ordering::Relaxed,
             )
             .ok()
-            .map(|_| WriteGuard {
-                data: NonNull::new(self.data.get()).expect("`UnsafeCell::get` never returns null"),
-                lock: self,
-                _invariant_over_u: PhantomData,
-            })
+            .map(|_| unsafe { WriteGuard::new(self) })
     }
 
     /// Get the underlying data of the lock.
@@ -158,6 +151,15 @@ unsafe impl<T: Sync, U: Sync> Send for ReadGuard<'_, T, U> {}
 unsafe impl<T: Sync, U: Sync> Sync for ReadGuard<'_, T, U> {}
 
 impl<'a, T> ReadGuard<'a, T> {
+    unsafe fn new(lock: &'a TryRwLock<T>) -> Self {
+        Self {
+            data: NonNull::new(lock.data.get()).expect("`UnsafeCell::get` never returns null"),
+            lock,
+        }
+    }
+}
+
+impl<'a, T, U> ReadGuard<'a, T, U> {
     /// Get a shared reference to the lock that this read guard has locked.
     #[must_use]
     pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
@@ -165,6 +167,9 @@ impl<'a, T> ReadGuard<'a, T> {
     }
 
     /// Attempt to upgrade the `ReadGuard` to a `WriteGuard`.
+    ///
+    /// Note that for soundness reasons, this will undo any [`map`](Self::map)ping that has
+    /// previously been applied.
     ///
     /// # Errors
     ///
@@ -177,20 +182,13 @@ impl<'a, T> ReadGuard<'a, T> {
             atomic::Ordering::Relaxed,
         ) {
             Ok(_) => {
-                let lock = guard.lock;
-                core::mem::forget(guard);
-                Ok(WriteGuard {
-                    data: unsafe { transmute(&*lock.data.get()) },
-                    lock,
-                    _invariant_over_u: PhantomData,
-                })
+                let guard = ManuallyDrop::new(guard);
+                Ok(unsafe { WriteGuard::new(guard.lock) })
             }
             Err(_) => Err(guard),
         }
     }
-}
 
-impl<'a, T, U> ReadGuard<'a, T, U> {
     /// Map to another value and keep locked.
     pub fn map<V>(guard: Self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'a, T, V> {
         let guard = ManuallyDrop::new(guard);
@@ -243,6 +241,16 @@ unsafe impl<T, U: Send> Send for WriteGuard<'_, T, U> {}
 unsafe impl<T, U: Sync> Sync for WriteGuard<'_, T, U> {}
 
 impl<'a, T> WriteGuard<'a, T> {
+    unsafe fn new(lock: &'a TryRwLock<T>) -> Self {
+        Self {
+            data: NonNull::new(lock.data.get()).expect("`UnsafeCell::get` never returns null"),
+            lock,
+            _invariant_over_u: PhantomData,
+        }
+    }
+}
+
+impl<'a, T, U> WriteGuard<'a, T, U> {
     /// Get a shared reference to the lock that this write guard has locked.
     #[must_use]
     pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
@@ -250,17 +258,15 @@ impl<'a, T> WriteGuard<'a, T> {
     }
 
     /// Downgrade the `WriteGuard` to a `ReadGuard`.
+    ///
+    /// Note that for soundness reasons, this will undo any [`map`](Self::map)ing that has
+    /// previously been applied.
     pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
         let guard = ManuallyDrop::new(guard);
         guard.lock.readers.store(1, atomic::Ordering::Release);
-        ReadGuard {
-            data: guard.data,
-            lock: guard.lock,
-        }
+        unsafe { ReadGuard::new(guard.lock) }
     }
-}
 
-impl<'a, T, U> WriteGuard<'a, T, U> {
     /// Map to another value and keep locked.
     pub fn map<V>(guard: Self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'a, T, V> {
         let mut guard = ManuallyDrop::new(guard);
