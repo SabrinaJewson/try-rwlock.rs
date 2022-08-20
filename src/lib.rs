@@ -20,6 +20,7 @@ use ::core::{
     cell::UnsafeCell,
     fmt::{self, Debug, Display, Formatter},
     marker::PhantomData,
+    mem::{transmute, ManuallyDrop},
     ops::{Deref, DerefMut},
     sync::atomic::{self, AtomicUsize},
 };
@@ -48,7 +49,7 @@ impl<T> TryRwLock<T> {
     ///
     /// If the lock is currently being written to or there are `usize::MAX` existing readers, this
     /// function will return `None`.
-    pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
+    pub fn try_read(&self) -> Option<ReadGuard<'_, T, T>> {
         self.readers
             .fetch_update(
                 atomic::Ordering::Acquire,
@@ -56,13 +57,16 @@ impl<T> TryRwLock<T> {
                 |readers| readers.checked_add(1),
             )
             .ok()
-            .map(|_| ReadGuard { lock: self })
+            .map(|_| ReadGuard {
+                data: unsafe { &*self.data.get() },
+                lock: self,
+            })
     }
 
     /// Attempt to lock this `TryRwLock` with unique write access.
     ///
     /// If the lock is currently being written to or read from, this function will return `None`.
-    pub fn try_write(&self) -> Option<WriteGuard<'_, T>> {
+    pub fn try_write(&self) -> Option<WriteGuard<'_, T, T>> {
         self.readers
             .compare_exchange(
                 0,
@@ -72,6 +76,7 @@ impl<T> TryRwLock<T> {
             )
             .ok()
             .map(|_| WriteGuard {
+                data: unsafe { transmute(&*self.data.get()) },
                 lock: self,
                 _send_sync_bounds: PhantomData,
             })
@@ -141,11 +146,12 @@ unsafe impl<T: Send + Sync> Sync for TryRwLock<T> {}
 
 /// A RAII guard that guarantees shared read access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
-pub struct ReadGuard<'a, T> {
+pub struct ReadGuard<'a, T, U> {
+    data: &'a U,
     lock: &'a TryRwLock<T>,
 }
 
-impl<'a, T> ReadGuard<'a, T> {
+impl<'a, T> ReadGuard<'a, T, T> {
     /// Get a shared reference to the lock that this read guard has locked.
     #[must_use]
     pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
@@ -157,7 +163,7 @@ impl<'a, T> ReadGuard<'a, T> {
     /// # Errors
     ///
     /// Fails if there is more than one reader currently using the lock.
-    pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'a, T>, Self> {
+    pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'a, T, T>, Self> {
         match guard.lock.readers.compare_exchange(
             1,
             usize::MAX,
@@ -168,6 +174,7 @@ impl<'a, T> ReadGuard<'a, T> {
                 let lock = guard.lock;
                 core::mem::forget(guard);
                 Ok(WriteGuard {
+                    data: unsafe { transmute(&*lock.data.get()) },
                     lock,
                     _send_sync_bounds: PhantomData,
                 })
@@ -177,28 +184,40 @@ impl<'a, T> ReadGuard<'a, T> {
     }
 }
 
-impl<T> Deref for ReadGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
+impl<'a, T, U> ReadGuard<'a, T, U> {
+    /// Map to another value and keep locked.
+    pub fn map<V>(self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'a, T, V> {
+        let guard = ManuallyDrop::new(self);
+        ReadGuard {
+            data: f(guard.data),
+            lock: guard.lock,
+        }
     }
 }
 
-impl<T> Drop for ReadGuard<'_, T> {
+impl<T, U> Deref for ReadGuard<'_, T, U> {
+    type Target = U;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<T, U> Drop for ReadGuard<'_, T, U> {
     fn drop(&mut self) {
         self.lock.readers.fetch_sub(1, atomic::Ordering::Release);
     }
 }
 
-impl<T: Debug> Debug for ReadGuard<'_, T> {
+impl<T, U: Debug> Debug for ReadGuard<'_, T, U> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("TryRwLockReadGuard")
             .field("data", &**self)
             .finish()
     }
 }
-impl<T: Display> Display for ReadGuard<'_, T> {
+
+impl<T, U: Display> Display for ReadGuard<'_, T, U> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&**self, f)
     }
@@ -206,12 +225,13 @@ impl<T: Display> Display for ReadGuard<'_, T> {
 
 /// A RAII guard that guarantees unique write access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
-pub struct WriteGuard<'a, T> {
+pub struct WriteGuard<'a, T, U> {
+    data: &'a UnsafeCell<U>,
     lock: &'a TryRwLock<T>,
     _send_sync_bounds: PhantomData<&'a mut T>,
 }
 
-impl<'a, T> WriteGuard<'a, T> {
+impl<'a, T> WriteGuard<'a, T, T> {
     /// Get a shared reference to the lock that this write guard has locked.
     #[must_use]
     pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
@@ -219,41 +239,57 @@ impl<'a, T> WriteGuard<'a, T> {
     }
 
     /// Downgrade the `WriteGuard` to a `ReadGuard`.
-    pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
+    pub fn downgrade(guard: Self) -> ReadGuard<'a, T, T> {
         let lock = guard.lock;
         core::mem::forget(guard);
         lock.readers.store(1, atomic::Ordering::Release);
-        ReadGuard { lock }
+        ReadGuard {
+            lock,
+            data: unsafe { &*lock.data.get() },
+        }
     }
 }
 
-impl<T> Deref for WriteGuard<'_, T> {
-    type Target = T;
+impl<'a, T, U> WriteGuard<'a, T, U> {
+    /// Map to another value and keep locked.
+    pub fn map<V>(self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'a, T, V> {
+        let guard = ManuallyDrop::new(self);
+        WriteGuard {
+            data: unsafe { transmute(&*f(&mut *guard.data.get())) },
+            lock: guard.lock,
+            _send_sync_bounds: guard._send_sync_bounds,
+        }
+    }
+}
+
+impl<T, U> Deref for WriteGuard<'_, T, U> {
+    type Target = U;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
+        unsafe { &*self.data.get() }
     }
 }
-impl<T> DerefMut for WriteGuard<'_, T> {
+impl<T, U> DerefMut for WriteGuard<'_, T, U> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
+        unsafe { &mut *self.data.get() }
     }
 }
 
-impl<T> Drop for WriteGuard<'_, T> {
+impl<T, U> Drop for WriteGuard<'_, T, U> {
     fn drop(&mut self) {
         self.lock.readers.store(0, atomic::Ordering::Release);
     }
 }
 
-impl<T: Debug> Debug for WriteGuard<'_, T> {
+impl<T, U: Debug> Debug for WriteGuard<'_, T, U> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("TryRwLockWriteGuard")
             .field("data", &**self)
             .finish()
     }
 }
-impl<T: Display> Display for WriteGuard<'_, T> {
+
+impl<T, U: Display> Display for WriteGuard<'_, T, U> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&**self, f)
     }
@@ -293,6 +329,31 @@ fn test_read() {
 }
 
 #[test]
+fn test_read_map() {
+    let lock = TryRwLock::new(vec![1u8, 2, 3]);
+
+    let guard_1 = lock.try_read().unwrap().map(|v| &v[0]);
+    let guard_2 = lock.try_read().unwrap().map(|v| &v[1]);
+    let guard_3 = lock.try_read().unwrap().map(|v| &v[2]);
+
+    assert!(lock.is_locked());
+    assert!(!lock.is_write_locked());
+    assert_eq!(lock.readers.load(atomic::Ordering::Relaxed), 3);
+
+    assert_eq!(*guard_1, 1);
+    assert_eq!(*guard_2, 2);
+    assert_eq!(*guard_3, 3);
+
+    drop(guard_1);
+    drop(guard_2);
+    drop(guard_3);
+
+    assert!(!lock.is_locked());
+    assert!(!lock.is_write_locked());
+    assert_eq!(lock.readers.load(atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
 fn test_write() {
     let lock = TryRwLock::new("Hello World!".to_owned());
 
@@ -312,4 +373,23 @@ fn test_write() {
     assert!(!lock.is_locked());
     assert!(!lock.is_write_locked());
     assert_eq!(&*lock.try_read().unwrap(), "Foo");
+}
+
+#[test]
+fn test_write_map() {
+    let lock = TryRwLock::new(vec![1u8, 2, 3]);
+
+    let guard = lock.try_write().unwrap().map(|v| &mut v[0]);
+
+    assert!(lock.is_locked());
+    assert!(lock.is_write_locked());
+    assert_eq!(lock.readers.load(atomic::Ordering::Relaxed), usize::MAX);
+
+    assert_eq!(*guard, 1);
+
+    drop(guard);
+
+    assert!(!lock.is_locked());
+    assert!(!lock.is_write_locked());
+    assert_eq!(lock.readers.load(atomic::Ordering::Relaxed), 0);
 }
