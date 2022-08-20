@@ -19,6 +19,7 @@
 use ::core::{
     cell::UnsafeCell,
     fmt::{self, Debug, Display, Formatter},
+    marker::PhantomData,
     mem::{transmute, ManuallyDrop},
     ops::{Deref, DerefMut},
     ptr::NonNull,
@@ -78,6 +79,7 @@ impl<T> TryRwLock<T> {
             .map(|_| WriteGuard {
                 data: NonNull::new(self.data.get()).expect("`UnsafeCell::get` never returns null"),
                 lock: self,
+                _invariant_over_u: PhantomData,
             })
     }
 
@@ -180,6 +182,7 @@ impl<'a, T> ReadGuard<'a, T> {
                 Ok(WriteGuard {
                     data: unsafe { transmute(&*lock.data.get()) },
                     lock,
+                    _invariant_over_u: PhantomData,
                 })
             }
             Err(_) => Err(guard),
@@ -231,6 +234,7 @@ impl<T, U: Display> Display for ReadGuard<'_, T, U> {
 pub struct WriteGuard<'a, T, U = T> {
     data: NonNull<U>,
     lock: &'a TryRwLock<T>,
+    _invariant_over_u: PhantomData<&'a mut U>,
 }
 
 // No bounds on `T` are required because the write guard's existence ensures exclusive access (so
@@ -263,6 +267,7 @@ impl<'a, T, U> WriteGuard<'a, T, U> {
         WriteGuard {
             data: NonNull::from(f(&mut **guard)),
             lock: guard.lock,
+            _invariant_over_u: PhantomData,
         }
     }
 }
