@@ -19,9 +19,9 @@
 use ::core::{
     cell::UnsafeCell,
     fmt::{self, Debug, Display, Formatter},
-    marker::PhantomData,
     mem::{transmute, ManuallyDrop},
     ops::{Deref, DerefMut},
+    ptr::NonNull,
     sync::atomic::{self, AtomicUsize},
 };
 
@@ -58,7 +58,7 @@ impl<T> TryRwLock<T> {
             )
             .ok()
             .map(|_| ReadGuard {
-                data: unsafe { &*self.data.get() },
+                data: NonNull::new(self.data.get()).expect("`UnsafeCell::get` never returns null"),
                 lock: self,
             })
     }
@@ -76,9 +76,8 @@ impl<T> TryRwLock<T> {
             )
             .ok()
             .map(|_| WriteGuard {
-                data: unsafe { transmute(&*self.data.get()) },
+                data: NonNull::new(self.data.get()).expect("`UnsafeCell::get` never returns null"),
                 lock: self,
-                _send_sync_bounds: PhantomData,
             })
     }
 
@@ -147,9 +146,14 @@ unsafe impl<T: Send + Sync> Sync for TryRwLock<T> {}
 /// A RAII guard that guarantees shared read access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
 pub struct ReadGuard<'a, T, U = T> {
-    data: &'a U,
+    data: NonNull<U>,
     lock: &'a TryRwLock<T>,
 }
+
+// Although we do provide access to the inner `RwLock`, since this type's existence ensures the
+// `RwLock` is read-locked we don't have to require `T: Send` or `U: Send`.
+unsafe impl<T: Sync, U: Sync> Send for ReadGuard<'_, T, U> {}
+unsafe impl<T: Sync, U: Sync> Sync for ReadGuard<'_, T, U> {}
 
 impl<'a, T> ReadGuard<'a, T> {
     /// Get a shared reference to the lock that this read guard has locked.
@@ -176,7 +180,6 @@ impl<'a, T> ReadGuard<'a, T> {
                 Ok(WriteGuard {
                     data: unsafe { transmute(&*lock.data.get()) },
                     lock,
-                    _send_sync_bounds: PhantomData,
                 })
             }
             Err(_) => Err(guard),
@@ -189,7 +192,7 @@ impl<'a, T, U> ReadGuard<'a, T, U> {
     pub fn map<V>(self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'a, T, V> {
         let guard = ManuallyDrop::new(self);
         ReadGuard {
-            data: f(guard.data),
+            data: NonNull::from(f(&**guard)),
             lock: guard.lock,
         }
     }
@@ -199,7 +202,7 @@ impl<T, U> Deref for ReadGuard<'_, T, U> {
     type Target = U;
 
     fn deref(&self) -> &Self::Target {
-        &self.data
+        unsafe { self.data.as_ref() }
     }
 }
 
@@ -226,10 +229,14 @@ impl<T, U: Display> Display for ReadGuard<'_, T, U> {
 /// A RAII guard that guarantees unique write access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
 pub struct WriteGuard<'a, T, U = T> {
-    data: &'a UnsafeCell<U>,
+    data: NonNull<U>,
     lock: &'a TryRwLock<T>,
-    _send_sync_bounds: PhantomData<&'a mut T>,
 }
+
+// No bounds on `T` are required because the write guard's existence ensures exclusive access (so
+// `T` becomes irrelevant).
+unsafe impl<T, U: Send> Send for WriteGuard<'_, T, U> {}
+unsafe impl<T, U: Sync> Sync for WriteGuard<'_, T, U> {}
 
 impl<'a, T> WriteGuard<'a, T> {
     /// Get a shared reference to the lock that this write guard has locked.
@@ -240,12 +247,11 @@ impl<'a, T> WriteGuard<'a, T> {
 
     /// Downgrade the `WriteGuard` to a `ReadGuard`.
     pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
-        let lock = guard.lock;
-        core::mem::forget(guard);
-        lock.readers.store(1, atomic::Ordering::Release);
+        let guard = ManuallyDrop::new(guard);
+        guard.lock.readers.store(1, atomic::Ordering::Release);
         ReadGuard {
-            lock,
-            data: unsafe { &*lock.data.get() },
+            data: guard.data,
+            lock: guard.lock,
         }
     }
 }
@@ -253,11 +259,10 @@ impl<'a, T> WriteGuard<'a, T> {
 impl<'a, T, U> WriteGuard<'a, T, U> {
     /// Map to another value and keep locked.
     pub fn map<V>(self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'a, T, V> {
-        let guard = ManuallyDrop::new(self);
+        let mut guard = ManuallyDrop::new(self);
         WriteGuard {
-            data: unsafe { transmute(&*f(&mut *guard.data.get())) },
+            data: NonNull::from(f(&mut **guard)),
             lock: guard.lock,
-            _send_sync_bounds: guard._send_sync_bounds,
         }
     }
 }
@@ -266,12 +271,12 @@ impl<T, U> Deref for WriteGuard<'_, T, U> {
     type Target = U;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.data.get() }
+        unsafe { self.data.as_ref() }
     }
 }
 impl<T, U> DerefMut for WriteGuard<'_, T, U> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.data.get() }
+        unsafe { self.data.as_mut() }
     }
 }
 
