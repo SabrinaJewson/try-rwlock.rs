@@ -49,7 +49,7 @@ impl<T> TryRwLock<T> {
     ///
     /// If the lock is currently being written to or there are `usize::MAX` existing readers, this
     /// function will return `None`.
-    pub fn try_read(&self) -> Option<ReadGuard<'_, T, T>> {
+    pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
         self.readers
             .fetch_update(
                 atomic::Ordering::Acquire,
@@ -66,7 +66,7 @@ impl<T> TryRwLock<T> {
     /// Attempt to lock this `TryRwLock` with unique write access.
     ///
     /// If the lock is currently being written to or read from, this function will return `None`.
-    pub fn try_write(&self) -> Option<WriteGuard<'_, T, T>> {
+    pub fn try_write(&self) -> Option<WriteGuard<'_, T>> {
         self.readers
             .compare_exchange(
                 0,
@@ -146,12 +146,12 @@ unsafe impl<T: Send + Sync> Sync for TryRwLock<T> {}
 
 /// A RAII guard that guarantees shared read access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
-pub struct ReadGuard<'a, T, U> {
+pub struct ReadGuard<'a, T, U = T> {
     data: &'a U,
     lock: &'a TryRwLock<T>,
 }
 
-impl<'a, T> ReadGuard<'a, T, T> {
+impl<'a, T> ReadGuard<'a, T> {
     /// Get a shared reference to the lock that this read guard has locked.
     #[must_use]
     pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
@@ -163,7 +163,7 @@ impl<'a, T> ReadGuard<'a, T, T> {
     /// # Errors
     ///
     /// Fails if there is more than one reader currently using the lock.
-    pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'a, T, T>, Self> {
+    pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'a, T>, Self> {
         match guard.lock.readers.compare_exchange(
             1,
             usize::MAX,
@@ -225,13 +225,13 @@ impl<T, U: Display> Display for ReadGuard<'_, T, U> {
 
 /// A RAII guard that guarantees unique write access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
-pub struct WriteGuard<'a, T, U> {
+pub struct WriteGuard<'a, T, U = T> {
     data: &'a UnsafeCell<U>,
     lock: &'a TryRwLock<T>,
     _send_sync_bounds: PhantomData<&'a mut T>,
 }
 
-impl<'a, T> WriteGuard<'a, T, T> {
+impl<'a, T> WriteGuard<'a, T> {
     /// Get a shared reference to the lock that this write guard has locked.
     #[must_use]
     pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
@@ -239,7 +239,7 @@ impl<'a, T> WriteGuard<'a, T, T> {
     }
 
     /// Downgrade the `WriteGuard` to a `ReadGuard`.
-    pub fn downgrade(guard: Self) -> ReadGuard<'a, T, T> {
+    pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
         let lock = guard.lock;
         core::mem::forget(guard);
         lock.readers.store(1, atomic::Ordering::Release);
