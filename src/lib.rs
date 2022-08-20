@@ -140,9 +140,9 @@ unsafe impl<T: Send + Sync> Sync for TryRwLock<T> {}
 
 /// A RAII guard that guarantees shared read access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
-pub struct ReadGuard<'a, T, U = T> {
+pub struct ReadGuard<'lock, T, U = T> {
     data: NonNull<U>,
-    lock: &'a TryRwLock<T>,
+    lock: &'lock TryRwLock<T>,
 }
 
 // Although we do provide access to the inner `RwLock`, since this type's existence ensures the
@@ -150,8 +150,8 @@ pub struct ReadGuard<'a, T, U = T> {
 unsafe impl<T: Sync, U: Sync> Send for ReadGuard<'_, T, U> {}
 unsafe impl<T: Sync, U: Sync> Sync for ReadGuard<'_, T, U> {}
 
-impl<'a, T> ReadGuard<'a, T> {
-    unsafe fn new(lock: &'a TryRwLock<T>) -> Self {
+impl<'lock, T> ReadGuard<'lock, T> {
+    unsafe fn new(lock: &'lock TryRwLock<T>) -> Self {
         Self {
             data: NonNull::new(lock.data.get()).expect("`UnsafeCell::get` never returns null"),
             lock,
@@ -159,10 +159,10 @@ impl<'a, T> ReadGuard<'a, T> {
     }
 }
 
-impl<'a, T, U> ReadGuard<'a, T, U> {
+impl<'lock, T, U> ReadGuard<'lock, T, U> {
     /// Get a shared reference to the lock that this read guard has locked.
     #[must_use]
-    pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
+    pub fn rwlock(guard: &Self) -> &'lock TryRwLock<T> {
         guard.lock
     }
 
@@ -174,7 +174,7 @@ impl<'a, T, U> ReadGuard<'a, T, U> {
     /// # Errors
     ///
     /// Fails if there is more than one reader currently using the lock.
-    pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'a, T>, Self> {
+    pub fn try_upgrade(guard: Self) -> Result<WriteGuard<'lock, T>, Self> {
         match guard.lock.readers.compare_exchange(
             1,
             usize::MAX,
@@ -190,7 +190,7 @@ impl<'a, T, U> ReadGuard<'a, T, U> {
     }
 
     /// Map to another value and keep locked.
-    pub fn map<V>(guard: Self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'a, T, V> {
+    pub fn map<V>(guard: Self, f: impl FnOnce(&U) -> &V) -> ReadGuard<'lock, T, V> {
         let guard = ManuallyDrop::new(guard);
         ReadGuard {
             data: NonNull::from(f(&**guard)),
@@ -199,7 +199,7 @@ impl<'a, T, U> ReadGuard<'a, T, U> {
     }
 
     /// Undo any previous mapping applied, returning the guard back to its original state.
-    pub fn unmap(guard: Self) -> ReadGuard<'a, T> {
+    pub fn unmap(guard: Self) -> ReadGuard<'lock, T> {
         let guard = ManuallyDrop::new(guard);
         unsafe { ReadGuard::new(guard.lock) }
     }
@@ -235,10 +235,10 @@ impl<T, U: Display> Display for ReadGuard<'_, T, U> {
 
 /// A RAII guard that guarantees unique write access to a `TryRwLock`.
 #[must_use = "if unused the TryRwLock will immediately unlock"]
-pub struct WriteGuard<'a, T, U = T> {
+pub struct WriteGuard<'lock, T, U = T> {
     data: NonNull<U>,
-    lock: &'a TryRwLock<T>,
-    _invariant_over_u: PhantomData<&'a mut U>,
+    lock: &'lock TryRwLock<T>,
+    _invariant_over_u: PhantomData<&'lock mut U>,
 }
 
 // No bounds on `T` are required because the write guard's existence ensures exclusive access (so
@@ -246,8 +246,8 @@ pub struct WriteGuard<'a, T, U = T> {
 unsafe impl<T, U: Send> Send for WriteGuard<'_, T, U> {}
 unsafe impl<T, U: Sync> Sync for WriteGuard<'_, T, U> {}
 
-impl<'a, T> WriteGuard<'a, T> {
-    unsafe fn new(lock: &'a TryRwLock<T>) -> Self {
+impl<'lock, T> WriteGuard<'lock, T> {
+    unsafe fn new(lock: &'lock TryRwLock<T>) -> Self {
         Self {
             data: NonNull::new(lock.data.get()).expect("`UnsafeCell::get` never returns null"),
             lock,
@@ -256,10 +256,10 @@ impl<'a, T> WriteGuard<'a, T> {
     }
 }
 
-impl<'a, T, U> WriteGuard<'a, T, U> {
+impl<'lock, T, U> WriteGuard<'lock, T, U> {
     /// Get a shared reference to the lock that this write guard has locked.
     #[must_use]
-    pub fn rwlock(guard: &Self) -> &'a TryRwLock<T> {
+    pub fn rwlock(guard: &Self) -> &'lock TryRwLock<T> {
         guard.lock
     }
 
@@ -267,14 +267,14 @@ impl<'a, T, U> WriteGuard<'a, T, U> {
     ///
     /// Note that for soundness reasons, this will undo any [`map`](Self::map)ing that has
     /// previously been applied.
-    pub fn downgrade(guard: Self) -> ReadGuard<'a, T> {
+    pub fn downgrade(guard: Self) -> ReadGuard<'lock, T> {
         let guard = ManuallyDrop::new(guard);
         guard.lock.readers.store(1, atomic::Ordering::Release);
         unsafe { ReadGuard::new(guard.lock) }
     }
 
     /// Map to another value and keep locked.
-    pub fn map<V>(guard: Self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'a, T, V> {
+    pub fn map<V>(guard: Self, f: impl FnOnce(&mut U) -> &mut V) -> WriteGuard<'lock, T, V> {
         let mut guard = ManuallyDrop::new(guard);
         WriteGuard {
             data: NonNull::from(f(&mut **guard)),
@@ -284,7 +284,7 @@ impl<'a, T, U> WriteGuard<'a, T, U> {
     }
 
     /// Undo any previous mapping applied, returning the guard back to its original state.
-    pub fn unmap(guard: Self) -> WriteGuard<'a, T> {
+    pub fn unmap(guard: Self) -> WriteGuard<'lock, T> {
         let guard = ManuallyDrop::new(guard);
         unsafe { WriteGuard::new(guard.lock) }
     }
