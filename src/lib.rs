@@ -143,6 +143,9 @@ unsafe impl<T: Send + Sync> Sync for TryRwLock<T> {}
 pub struct ReadGuard<'lock, T, U = T> {
     data: NonNull<U>,
     lock: &'lock TryRwLock<T>,
+    // This also enforces a `U: 'lock` bound, which is necessary for soundness (see
+    // https://github.com/SabrinaJewson/try-rwlock.rs/issues/2)
+    _covariant_over_u: PhantomData<&'lock U>,
 }
 
 // Although we do provide access to the inner `RwLock`, since this type's existence ensures the
@@ -155,6 +158,7 @@ impl<'lock, T> ReadGuard<'lock, T> {
         Self {
             data: NonNull::new(lock.data.get()).expect("`UnsafeCell::get` never returns null"),
             lock,
+            _covariant_over_u: PhantomData,
         }
     }
 }
@@ -195,6 +199,7 @@ impl<'lock, T, U> ReadGuard<'lock, T, U> {
         ReadGuard {
             data: NonNull::from(f(&**guard)),
             lock: guard.lock,
+            _covariant_over_u: PhantomData,
         }
     }
 
