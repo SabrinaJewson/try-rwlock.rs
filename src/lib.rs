@@ -148,10 +148,10 @@ pub struct ReadGuard<'lock, T, U = T> {
     _covariant_over_u: PhantomData<&'lock U>,
 }
 
-// Although we do provide access to the inner `RwLock`, since this type's existence ensures the
-// `RwLock` is read-locked we don't have to require `T: Send` or `U: Send`.
-unsafe impl<T: Sync, U: Sync> Send for ReadGuard<'_, T, U> {}
-unsafe impl<T: Sync, U: Sync> Sync for ReadGuard<'_, T, U> {}
+// As we expose a `TryRwlock<T>`, we first inherit the bounds for `&TryRwLock<T>: Sync` on T; as we
+// give shared access to the `U`, we use the same bounds as `&U` on `U`.
+unsafe impl<T: Send + Sync, U: Sync> Send for ReadGuard<'_, T, U> {}
+unsafe impl<T: Send + Sync, U: Sync> Sync for ReadGuard<'_, T, U> {}
 
 impl<'lock, T> ReadGuard<'lock, T> {
     unsafe fn new(lock: &'lock TryRwLock<T>) -> Self {
@@ -246,10 +246,10 @@ pub struct WriteGuard<'lock, T, U = T> {
     _invariant_over_u: PhantomData<&'lock mut U>,
 }
 
-// No bounds on `T` are required because the write guard's existence ensures exclusive access (so
-// `T` becomes irrelevant).
-unsafe impl<T, U: Send> Send for WriteGuard<'_, T, U> {}
-unsafe impl<T, U: Sync> Sync for WriteGuard<'_, T, U> {}
+// As we expose a `TryRwlock<T>`, we first inherit the bounds for `&TryRwLock<T>: Sync` on T; as we
+// give exclusive access to the `U`, we use the same bounds as `&mut U` on `U`.
+unsafe impl<T: Send + Sync, U: Send> Send for WriteGuard<'_, T, U> {}
+unsafe impl<T: Send + Sync, U: Sync> Sync for WriteGuard<'_, T, U> {}
 
 impl<'lock, T> WriteGuard<'lock, T> {
     unsafe fn new(lock: &'lock TryRwLock<T>) -> Self {
